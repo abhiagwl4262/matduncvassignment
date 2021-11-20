@@ -83,10 +83,10 @@ class Model(torch.nn.Module):
         x = self.conv1x1(x)
        
         ##method 1 - Use FC layer to map 1024 to nc classes
-        #return self.FC(x.view(-1)).unsqueeze(0)
+        return self.FC(x.view(-1)).unsqueeze(0)
 
         ## method 2 - take the mean of 1024 values and use logistic classifier 
-        return torch.sigmoid(torch.mean(x))
+        #return torch.sigmoid(torch.mean(x))
          
 def smooth_BCE(eps=0.1):  # https://github.com/ultralytics/yolov3/issues/238#issuecomment-598028441
     # return positive, negative label smoothing BCE targets
@@ -175,26 +175,29 @@ def run_eval(model, data_loader, device, epoch, num_classes, criterion=None):
       # compute output, measure accuracy and record loss.
       outputs = model(inputs)
       if criterion:
-          #loss = criterion(output, labels).item()
-          loss = criterion(outputs, labels[0].float()).item()
+          ##method 1
+          loss = criterion(outputs, labels).item()
+          ##method 2
+          #loss = criterion(outputs, labels[0].float()).item()
       else:
           loss = 0.0
 
-      #_, preds_ = torch.max(output, 1)
-      preds = outputs.item() > 0.5
+      ##method 1 
+      _, preds_ = torch.max(outputs, 1)
+      preds.extend(preds_.cpu().numpy())
+      gts.extend(labels.cpu().numpy())
+      ##method 2 
+      #preds = outputs.item() > 0.5
     
-      #preds.extend(preds_.cpu().numpy())
-      #gts.extend(labels.cpu().numpy())
-      
       # statistics
       running_loss += loss * inputs.size(0)
-      running_corrects += torch.sum(preds == labels.data)
+      running_corrects += torch.sum(preds_ == labels.data)
 
-  #preds = np.array(preds)
-  #gts   = np.array(gts)
-
-  #print("Cij  is equal to the number of observations known to be in group i and predicted to be in group j")
-  #print(confusion_matrix(gts, preds))
+  ##method 1 
+  preds = np.array(preds)
+  gts   = np.array(gts)
+  print("Cij  is equal to the number of observations known to be in group i and predicted to be in group j")
+  print(confusion_matrix(gts, preds))
 
   eval_loss = running_loss / len(data_loader.dataset)
   eval_accuracy = running_corrects / float(len(data_loader.dataset))
@@ -270,9 +273,11 @@ def main(args):
   
   best_acc = -1
   log_file = open(os.path.join(args.logdir, "training_log.txt"), "w")
-  
-  #criterion = torch.nn.CrossEntropyLoss().to(device)
-  criterion = torch.nn.BCELoss().to(device)
+ 
+  ##method 1 
+  criterion = torch.nn.CrossEntropyLoss().to(device)
+  ## method 2
+  #criterion = torch.nn.BCELoss().to(device)
   
   print("Starting training!")
   for epoch in range(start_epoch, args.epochs):
@@ -300,9 +305,10 @@ def main(args):
 
           # compute output
           outputs = model(inputs)
-
-          #loss = criterion(outputs, labels)
-          loss = criterion(outputs, labels[0].float())
+          ## method 1 
+          loss = criterion(outputs, labels)
+          ##method 2
+          #loss = criterion(outputs, labels[0].float())
           loss.backward()
           
           # Update params
@@ -310,8 +316,10 @@ def main(args):
 
           # statistics
           running_loss += loss.item() * inputs.size(0)
-          preds = outputs.item() > 0.5
-          #_, preds = torch.max(outputs, 1)
+          ##method 1
+          _, preds = torch.max(outputs, 1)
+          ##method 2
+          #preds = outputs.item() > 0.5
           running_corrects += torch.sum(preds == labels.data)
 
       train_loss = running_loss / len(train_loader.dataset)
