@@ -10,21 +10,32 @@ import numpy as np
 import tqdm
 from sklearn.metrics import confusion_matrix
 
-from resnet import resnet18, resnet50
-
-try:
-    from torch.cuda import amp
-    amp_train = True
-except:
-    amp_train = False
-
+from resnet import resnet18, resnet50, resnet34
 
 class_dict = {"good":0, "bad" :1}
 #class_dict = {"good":0, "bad" :1, "outlier":2}
+class AverageMeter(object):
 
-class Model(torch.nn.Module):
+    """Computes and stores the average and current value"""
+    
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+    
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+class PatchWise_FCN(torch.nn.Module):
     def __init__(self, classes, base_model):
-        super(Model, self).__init__()
+        super(PatchWise_FCN, self).__init__()
         self.nc = classes
         self.base_model = base_model
         
@@ -87,7 +98,91 @@ class Model(torch.nn.Module):
 
         ## method 2 - take the mean of 1024 values and use logistic classifier 
         #return torch.sigmoid(torch.mean(x))
-         
+
+class SWAP(torch.nn.Module):
+    def __init__(self):
+        super(SWAP, self).__init__()
+        self.weight = torch.nn.Parameter(data=torch.randn(1024), requires_grad=True) 
+        self.weight.data.uniform_(0, 1)
+
+    def forward(self, inp):
+        s = torch.sum(torch.abs(self.weight))
+        out = torch.sum(inp.mul(torch.abs(self.weight))/s) - 0.5
+        return out
+
+class ImageWise_FCN(torch.nn.Module):
+    def __init__(self, classes, base_model):
+        super(ImageWise_FCN, self).__init__()
+        self.nc = classes
+        self.base_model = base_model
+        self.base_model.avgpool = torch.nn.Identity()
+        self.base_model.fc = torch.nn.Identity()
+        
+        
+        self.conv1 = torch.nn.Conv2d(in_channels=3,out_channels=64, 
+                kernel_size=(3,3), stride=(1,1), padding=(1,1))
+        self.bn1   = torch.nn.BatchNorm2d(64)
+        self.pool1 = torch.nn.MaxPool2d(kernel_size=(2,2))
+        
+        self.conv2 = torch.nn.Conv2d(in_channels=64,out_channels=128, 
+                kernel_size=(3,3), stride=(1,1), padding=(1,1))
+        self.bn2   = torch.nn.BatchNorm2d(128)
+        self.pool2 = torch.nn.MaxPool2d(kernel_size=(2,2))
+        
+        self.conv3 = torch.nn.Conv2d(in_channels=128,out_channels=256, 
+                kernel_size=(3,3), stride=(1,1), padding=(1,1))
+        self.bn3   = torch.nn.BatchNorm2d(256)
+        self.pool3 = torch.nn.MaxPool2d(kernel_size=(2,2))
+        
+        self.conv4 = torch.nn.Conv2d(in_channels=256,out_channels=512, 
+                kernel_size=(3,3), stride=(1,1), padding=(1,1))
+        self.bn4   = torch.nn.BatchNorm2d(512)
+        self.pool4 = torch.nn.MaxPool2d(kernel_size=(2,2))
+        
+        self.conv1x1 = torch.nn.Conv2d(in_channels=512,out_channels=1, 
+                kernel_size=(1,1), stride=(1,1), padding=0)
+        
+        self.relu  = torch.nn.ReLU(inplace=True) 
+        
+        self.FC    = torch.nn.Linear(in_features=1024, out_features=self.nc)
+        self.sigmoid = torch.nn.Sigmoid()
+        
+        self.swap = SWAP()
+
+    def forward(self, inp):
+        #x = self.base_model(inp)
+        x = self.conv1(inp)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.pool1(x)
+
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = self.relu(x)
+        x = self.pool2(x)
+
+        x = self.conv3(x)
+        x = self.bn3(x)
+        x = self.relu(x)
+        x = self.pool3(x)
+        
+        x = self.conv4(x)
+        x = self.bn4(x)
+        x = self.relu(x)
+        x = self.pool4(x)
+
+        x = self.conv1x1(x)
+        x = self.sigmoid(x) ## output is (BS,1,32,32)
+
+        return self.sigmoid(self.swap(x.view(-1)))
+        ##method 1 - Use FC layer to map 1024 to nc classes
+        #x = x.view(-1)
+        #return self.FC(x).unsqueeze(0)
+
+        ## method 2 - take the mean of 1024 values and use logistic classifier 
+        
+        #return torch.mean(x)
+
 def smooth_BCE(eps=0.1):  # https://github.com/ultralytics/yolov3/issues/238#issuecomment-598028441
     # return positive, negative label smoothing BCE targets
     return 1.0 - 0.5 * eps, 0.5 * eps
@@ -176,28 +271,28 @@ def run_eval(model, data_loader, device, epoch, num_classes, criterion=None):
       outputs = model(inputs)
       if criterion:
           ##method 1
-          loss = criterion(outputs, labels).item()
+          #loss = criterion(outputs, labels).item()
           ##method 2
-          #loss = criterion(outputs, labels[0].float()).item()
+          loss = criterion(outputs, labels[0].float()).item()
       else:
           loss = 0.0
 
       ##method 1 
-      _, preds_ = torch.max(outputs, 1)
+      '''_, preds_ = torch.max(outputs, 1)
       preds.extend(preds_.cpu().numpy())
-      gts.extend(labels.cpu().numpy())
+      gts.extend(labels.cpu().numpy())'''
       ##method 2 
-      #preds = outputs.item() > 0.5
+      preds_ = outputs.item() > 0.5
     
       # statistics
       running_loss += loss * inputs.size(0)
       running_corrects += torch.sum(preds_ == labels.data)
 
   ##method 1 
-  preds = np.array(preds)
+  '''preds = np.array(preds)
   gts   = np.array(gts)
   print("Cij  is equal to the number of observations known to be in group i and predicted to be in group j")
-  print(confusion_matrix(gts, preds))
+  print(confusion_matrix(gts, preds))'''
 
   eval_loss = running_loss / len(data_loader.dataset)
   eval_accuracy = running_corrects / float(len(data_loader.dataset))
@@ -230,7 +325,7 @@ def main(args):
 
   train_set, valid_set, train_loader, valid_loader = mktrainval(args)
   
-  model = Model(classes, resnet50(pretrained=True))
+  model = ImageWise_FCN(classes, resnet34(pretrained=True))
   model = torch.nn.DataParallel(model)
   model = model.to(device)
 
@@ -243,12 +338,12 @@ def main(args):
   if args.optimizer == "sgd":            
       # It seems that SGD optimizer is better than Adam optimizer for ResNet18 training on CIFAR10.
       if args.wd:
-          optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=1e-5)
+          optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=1e-4)
       else:
           optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
   elif args.optimizer == "adam":
       if args.wd:
-          optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=1e-5, amsgrad=False)
+          optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=1e-4, amsgrad=False)
       else:
           optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999), eps=1e-08, amsgrad=False)
   
@@ -275,9 +370,9 @@ def main(args):
   log_file = open(os.path.join(args.logdir, "training_log.txt"), "w")
  
   ##method 1 
-  criterion = torch.nn.CrossEntropyLoss().to(device)
+  #criterion = torch.nn.CrossEntropyLoss().to(device)
   ## method 2
-  #criterion = torch.nn.BCELoss().to(device)
+  criterion = torch.nn.BCELoss().to(device)
   
   print("Starting training!")
   for epoch in range(start_epoch, args.epochs):
@@ -289,7 +384,6 @@ def main(args):
       pbar = enumerate(train_loader)
       pbar = tqdm.tqdm(pbar, total=len(train_loader))
 
-      all_top1, all_top5 = [], []
       for param_group in optimizer.param_groups:
           lr = param_group["lr"]
           
@@ -306,20 +400,20 @@ def main(args):
           # compute output
           outputs = model(inputs)
           ## method 1 
-          loss = criterion(outputs, labels)
+          #loss = criterion(outputs, labels)
           ##method 2
-          #loss = criterion(outputs, labels[0].float())
-          loss.backward()
+          loss = criterion(outputs, labels[0].float())
           
           # Update params
+          loss.backward()
           optimizer.step()
 
           # statistics
           running_loss += loss.item() * inputs.size(0)
           ##method 1
-          _, preds = torch.max(outputs, 1)
+          #_, preds = torch.max(outputs, 1)
           ##method 2
-          #preds = outputs.item() > 0.5
+          preds = outputs.item() > 0.5
           running_corrects += torch.sum(preds == labels.data)
 
       train_loss = running_loss / len(train_loader.dataset)
